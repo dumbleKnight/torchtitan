@@ -16,6 +16,7 @@ from typing import Iterable
 
 import torch
 import torch.distributed as dist
+from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 
 import torchtitan.components.ft as ft
 
@@ -23,7 +24,8 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 
 from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.optimizer import build_optimizers
-
+from torchtitan.distributed import utils as dist_utils
+import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.config import ConfigManager, JobConfig
 
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
@@ -36,6 +38,7 @@ from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
 # from checkpoint import load_weights_from_hf
 
 from torchtitan.experiments.deepseek_v3.model_config import deepseek_config_registry
+from torchtitan.experiments.deepseek_v3.model_args import DeepSeekV3ModelArgs
 
 from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import (
     get_hf_tokenizer,
@@ -145,24 +148,25 @@ def run_full_model(
     # model.setup_symm_mem(torch.bfloat16, device)
 
     torch.manual_seed(ep_rank)
-    bs = config.training.local_batch_size  # * microbatches  # 4
-    seqlen = config.training.seq_len  # 128
 
+    model_args = DeepSeekV3ModelArgs()
+    model_args.update_from_config(config)
     # metrics manager
+    parallelism_config = config.parallelism
     proxy_parallel_dims = ParallelDims(
-        dp_replicate=ep_size,
-        dp_shard=fsdp_dim,
-        pp=pp_size,
-        cp=1,
-        tp=1,
-        ep=1,
+        dp_replicate=parallelism_config.data_parallel_replicate_degree,
+        dp_shard=parallelism_config.data_parallel_shard_degree,
+        pp=parallelism_config.pipeline_parallel_degree,
+        cp=parallelism_config.context_parallel_degree,
+        tp=parallelism_config.tensor_parallel_degree,
+        ep=parallelism_config.expert_parallel_degree,
         world_size=world_mesh.size(),
     )
 
     metrics_processor = build_metrics_processor(
         config, proxy_parallel_dims, model_args=None
     )
-    metrics_processor.num_flops_per_token = 100
+    metrics_processor.num_flops_per_token = model_args.get_nparams_and_flops(model, config.training.seq_len)[1]
 
     color = metrics_processor.color
     device_memory_monitor = metrics_processor.device_memory_monitor
@@ -179,10 +183,17 @@ def run_full_model(
     # Create loss function
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
 
-    ft_manager = ft.init_ft_manager(config)
-    optimizer = build_optimizers([model], config, proxy_parallel_dims, ft_manager)
+    # ft_manager = ft.init_ft_manager(config)
+    # optimizer = build_optimizers([model], config, proxy_parallel_dims, ft_manager)
+    # 确保optimizer配置有early_step_in_backward属性
+    optimizer_config = config.optimizer
+    if not hasattr(optimizer_config, 'early_step_in_backward'):
+        optimizer_config.early_step_in_backward = False
+    
+    optimizer = build_optimizers([model], optimizer_config, proxy_parallel_dims)
 
-    lr_scheduler = build_lr_schedulers(optimizer, config)
+    lr_scheduler_config = config.lr_scheduler
+    lr_scheduler = build_lr_schedulers(optimizer, lr_scheduler_config, training_steps=config.training.steps)
 
     # Run forward and backward
     steps = config.training.steps
@@ -195,9 +206,8 @@ def run_full_model(
 
         inputs, label = next_batch(data_iterator, metrics_processor)
         x = inputs["input"]
-
+        print(f"rank {rank} step {step} x.shape: {x.shape} label.shape: {label.shape}")
         if pp_size > 1:
-
             # Create pipeline stage
             stage = PipelineStage(
                 model,
@@ -223,15 +233,23 @@ def run_full_model(
             y = model(x)
             loss = loss_fn(y, label)
             loss.backward()
-
-        if pp_rank == pp_size - 1:
-
-            global_avg_loss = global_max_loss = loss  # .detach().item()
-
-            metrics_processor.log(step, global_avg_loss, global_max_loss)
-
+        
+        model_parts = [model]
+        grad_norm = dist_utils.clip_grad_norm_(
+            [p for m in model_parts for p in m.parameters()],
+            config.training.max_norm,
+            foreach=True,
+            pp_mesh=(
+                proxy_parallel_dims.world_mesh["pp"] if proxy_parallel_dims.pp_enabled else None
+            ),
+            ep_enabled=proxy_parallel_dims.ep_enabled,
+        )
         optimizer.step()
         lr_scheduler.step()
+
+        if pp_rank == pp_size - 1:
+            global_avg_loss = global_max_loss = loss  # .detach().item()
+            metrics_processor.log(step, global_avg_loss, global_max_loss, grad_norm.item())
 
     metrics_processor.close()
     logger.info("Training completed")

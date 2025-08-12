@@ -16,8 +16,8 @@ import torch
 import torch.distributed as dist
 
 # from checkpoint import load_weights_from_hf
-from model import DeepseekForCausalLM
-from model_config import deepseek_config_registry
+from torchtitan.experiments.deepseek_v3.model import DeepseekForCausalLM
+from torchtitan.experiments.deepseek_v3.model_config import deepseek_config_registry
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
@@ -101,13 +101,13 @@ def run_full_model(
     seqlen = 128
     x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
     label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
-
     # Create loss function
     loss_fn = torch.nn.functional.cross_entropy
 
     # Run forward and backward
     steps = 2
-    for _ in range(steps):
+    for step in range(steps):
+        print(f"rank {rank} step {step} x.shape: {x.shape} label.shape: {label.shape}")
         if pp_size > 1:
             # Create pipeline stage
             stage = PipelineStage(
@@ -151,7 +151,7 @@ if __name__ == "__main__":
     # set device before init_device mesh, otherwise ep will have duplicate device mapping
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
-    mesh = dist.init_device_mesh("cuda", (2, 2, 2), mesh_dim_names=("pp", "ep", "fsdp"))
+    mesh = dist.init_device_mesh("cuda", (1, 2, 2), mesh_dim_names=("pp", "ep", "fsdp"))
 
     run_full_model(mesh)
 

@@ -19,18 +19,18 @@ from .infra.parallelize_deepseek import parallelize_deepseek
 
 from .model import DeepseekForCausalLM
 
-from .model_args import TransformerModelArgs
+from .model_args import DeepSeekV3ModelArgs
 
 
 __all__ = [
-    "TransformerModelArgs",
+    "DeepSeekV3ModelArgs",
     "DeepseekForCausalLM",
     "deepseek_configs",
 ]
 
 
 deepseek_configs = {
-    "debugmodel": TransformerModelArgs(
+    "debugmodel": DeepSeekV3ModelArgs(
         dim=256,
         n_layers=6,
         n_heads=16,
