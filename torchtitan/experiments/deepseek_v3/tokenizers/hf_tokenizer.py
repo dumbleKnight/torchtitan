@@ -26,12 +26,13 @@ class TokenizerWrapper:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
-    def encode(self, text, bos=False, eos=False, **kwargs):
+    def encode(self, text, add_bos=False, add_eos=False, **kwargs):
         # Handle bos and eos parameters
-        if bos:
+        if add_bos:
             kwargs["add_special_tokens"] = True
-        if eos:
+        if add_eos:
             kwargs["add_special_tokens"] = True
+
 
         return self.tokenizer.encode(text, **kwargs)
 

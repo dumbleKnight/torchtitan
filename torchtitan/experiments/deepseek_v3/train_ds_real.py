@@ -206,7 +206,6 @@ def run_full_model(
 
         inputs, label = next_batch(data_iterator, metrics_processor)
         x = inputs["input"]
-        print(f"rank {rank} step {step} x.shape: {x.shape} label.shape: {label.shape}")
         if pp_size > 1:
             # Create pipeline stage
             stage = PipelineStage(

@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # 设置Python路径
-export CUDA_LAUNCH_BLOCKING=1
 export PYTHONPATH=/nfs/yy/torchtitan:$PYTHONPATH
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
